@@ -1,0 +1,47 @@
+name: refresh-data
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # tiap 10 menit (GitHub minimum 5 menit; bisa telat saat peak)
+  workflow_dispatch: {}       # tombol "Run workflow" manual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps (slim)
+        run: pip install -r requirements-runtime.txt
+
+      - name: Restore trending.db
+        uses: actions/cache@v4
+        with:
+          path: var/trending.db
+          key: trending-db-v1
+
+      - name: Run one fetch cycle + publish to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HYPERLIQUID_WATCHLIST: ${{ secrets.HYPERLIQUID_WATCHLIST }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
+        run: python scripts/run_once.py
