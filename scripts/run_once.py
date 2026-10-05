@@ -40,6 +40,8 @@ from app.signals import compute_signals         # noqa: E402
 SITE = ROOT / "static-site"
 DATA = SITE / "data"
 HF_REPO = os.environ.get("HF_SPACE_REPO", "Jetbard/trending-medsos")
+# Data JSON dipublikasikan ke repo dataset bernama acak (UI Space tetap privat).
+DATA_REPO = os.environ.get("HF_DATA_REPO", "Jetbard/tmx-feed-g9nh5j")
 CATEGORIES = sorted({c for g in FETCHER_GROUPS for c in g["categories"]})
 
 
@@ -101,11 +103,25 @@ async def main() -> None:
         return
     from huggingface_hub import HfApi
     api = HfApi(token=token)
+
+    # 1) Data JSON -> repo dataset publik (nama acak; di-fetch langsung browser).
+    try:
+        api.create_repo(DATA_REPO, repo_type="dataset", private=False, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[run] create dataset repo skip: {e}")
     api.upload_folder(
-        folder_path=str(SITE), repo_id=HF_REPO, repo_type="space",
+        folder_path=str(DATA), repo_id=DATA_REPO, repo_type="dataset",
         commit_message=f"data refresh {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
     )
-    print(f"[run] ter-upload ke Space {HF_REPO}")
+    print(f"[run] data ter-publish ke dataset {DATA_REPO}")
+
+    # 2) Situs (tanpa data) -> Space privat.
+    api.upload_folder(
+        folder_path=str(SITE), repo_id=HF_REPO, repo_type="space",
+        commit_message=f"site refresh {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
+        ignore_patterns=["data/**", "data/*"],
+    )
+    print(f"[run] situs ter-upload ke Space {HF_REPO}")
 
 
 if __name__ == "__main__":
