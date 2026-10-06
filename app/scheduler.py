@@ -80,6 +80,31 @@ async def run_fast_fetchers(triggered_by: str = "scheduler-fast") -> dict:
         log.error("Fast fetch run failed: %s", e)
         return {"error": str(e)}
     counts = await storage.upsert_records(records)
+
+    # Snapshot posisi whale → position_history (bahan deteksi pola build di signals.py).
+    now = epoch_ms()
+    hist_rows = []
+    for rec in records:
+        extra = rec.get("extra") or {}
+        if rec.get("source") == "hyperliquid" and extra.get("address"):
+            try:
+                hist_rows.append({
+                    "ts": now,
+                    "address": str(extra["address"]),
+                    "coin": str(extra["coin"]),
+                    "szi": float(extra.get("szi") or 0),
+                    "entry_px": (
+                        float(extra["entry_px"]) if extra.get("entry_px") is not None else None
+                    ),
+                })
+            except (TypeError, ValueError):
+                continue
+    if hist_rows:
+        try:
+            await storage.append_position_history(hist_rows)
+        except Exception as e:  # noqa: BLE001
+            log.warning("position_history append failed: %s", e)
+
     summary = {
         "fast": {
             "total": counts["total"], "new": counts["new"],

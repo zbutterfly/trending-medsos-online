@@ -50,7 +50,30 @@ CREATE TABLE IF NOT EXISTS fetch_runs (
     error      TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_by_started ON fetch_runs(started_at DESC);
-"""
+
+-- Snapshot posisi whale per siklus fast-lane — bahan deteksi pola build
+-- (≥3 penambahan dalam ≥3 hari = conviction; cetakan tunggal = bisa hedge).
+CREATE TABLE IF NOT EXISTS position_history (
+    ts       INTEGER NOT NULL,
+    address  TEXT NOT NULL,
+    coin     TEXT NOT NULL,
+    szi      REAL NOT NULL,
+    entry_px REAL,
+    PRIMARY KEY (address, coin, ts)
+);
+CREATE INDEX IF NOT EXISTS poshist_by_addr ON position_history(address, coin, ts DESC);
+
+-- Log sinyal per 2 jam per simbol — bahan pengukuran akurasi (hit-rate 4h/24h)
+-- dan labeling masa depan untuk LightGBM.
+CREATE TABLE IF NOT EXISTS signal_log (
+    bucket  INTEGER NOT NULL,
+    symbol  TEXT NOT NULL,
+    venue   TEXT NOT NULL,
+    ts      INTEGER NOT NULL,
+    score   REAL NOT NULL,
+    reasons TEXT NOT NULL,
+    PRIMARY KEY (symbol, venue, bucket)
+);"""
 
 
 def _ensure_db() -> None:
@@ -198,5 +221,80 @@ async def latest_runs(limit: int = 20) -> List[Dict[str, Any]]:
             "count": r[5],
             "error": r[6],
         }
+        for r in rows
+    ]
+
+
+# === position_history (whale build detection) ===
+async def append_position_history(rows: List[Dict[str, Any]]) -> int:
+    """Rows: {ts, address, coin, szi, entry_px}. Upsert per (address, coin, ts)."""
+    if not rows:
+        return 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for r in rows:
+            try:
+                await db.execute(
+                    "INSERT OR REPLACE INTO position_history (ts, address, coin, szi, entry_px) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        int(r["ts"]),
+                        str(r["address"]),
+                        str(r["coin"]),
+                        float(r["szi"]),
+                        float(r["entry_px"]) if r.get("entry_px") is not None else None,
+                    ),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        await db.commit()
+    return len(rows)
+
+
+async def list_position_history(address: str, coin: str, since_ms: int) -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT ts, szi, entry_px FROM position_history "
+            "WHERE address=? AND coin=? AND ts>=? ORDER BY ts ASC",
+            (address, coin, since_ms),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+    return [{"ts": r[0], "szi": r[1], "entry_px": r[2]} for r in rows]
+
+
+# === signal_log (accuracy tracking) ===
+async def log_signal(rows: List[Dict[str, Any]]) -> int:
+    """Rows: {bucket, symbol, venue, ts, score, reasons}. 1 baris per simbol per bucket 2 jam."""
+    if not rows:
+        return 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        for r in rows:
+            await db.execute(
+                "INSERT OR IGNORE INTO signal_log (bucket, symbol, venue, ts, score, reasons) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    int(r["bucket"]),
+                    str(r["symbol"]),
+                    str(r["venue"]),
+                    int(r["ts"]),
+                    float(r["score"]),
+                    str(r["reasons"]),
+                ),
+            )
+        await db.commit()
+    return len(rows)
+
+
+async def list_signal_log(limit: int = 1000) -> List[Dict[str, Any]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT bucket, symbol, venue, ts, score, reasons "
+            "FROM signal_log ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+    return [
+        {"bucket": r[0], "symbol": r[1], "venue": r[2], "ts": r[3], "score": r[4], "reasons": r[5]}
         for r in rows
     ]
