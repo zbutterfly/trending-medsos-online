@@ -48,6 +48,8 @@ SOURCE_WEIGHTS: Dict[str, float] = {
     # Tier 5 — weak / paid / anonymous
     "dexscreener": 0.15,   # boosts are ADVERTISING slots
     "nitter": 0.20, "threads": 0.15,
+    # New-pool watcher: data mentah pool baru — sinyal awareness, bukan endorsement
+    "geckoterminal": 0.50,
 }
 DEFAULT_WEIGHT = 0.35
 
@@ -64,6 +66,7 @@ IDX_SLUG_RE = re.compile(r"/news/stock_n/([a-zA-Z0-9]{4})-")
 SIGNAL_CATEGORIES = (
     "signal.news",
     "signal.onchain",
+    "signal.newtoken",
     "sentiment.reddit",
     "sentiment.x",
     "sentiment.coin.news",
@@ -133,6 +136,7 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
     hedge_any: Dict[str, bool] = defaultdict(bool)
     whale_clean: Dict[str, bool] = defaultdict(bool)
     build_reasons: Dict[Tuple[str, str], str] = {}
+    newtoken_reasons: Dict[Tuple[str, str], str] = {}
     per_symbol: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     for it in items:
@@ -152,6 +156,14 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
         is_whale = it.get("source") == "hyperliquid"
         whale_hedge = is_whale and bool(extra.get("hedge"))
         build_reason: Optional[str] = None
+        if it.get("source") == "geckoterminal" and extra.get("symbol"):
+            try:
+                _age = float(extra.get("age_h") or 0)
+                newtoken_reasons[(str(extra["symbol"]).upper(), "crypto")] = (
+                    f"token baru: usia {_age:.0f} jam di {extra.get('network', '?')}"
+                )
+            except (TypeError, ValueError):
+                pass
         if is_whale and not whale_hedge:
             addr = str(extra.get("address") or "")
             coin = str(extra.get("coin") or "")
@@ -216,6 +228,8 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
             reasons.append(f"smart-money x{SMART_MONEY_MULT}")
         if (sym, venue) in build_reasons:
             reasons.append(build_reasons[(sym, venue)])
+        if (sym, venue) in newtoken_reasons:
+            reasons.append(newtoken_reasons[(sym, venue)])
         if hedged_only:
             reasons.append("hedge: whale delta-neutral (spot mengisi perp short)")
         if e["fresh_2h"] >= BURST_MIN_ITEMS:

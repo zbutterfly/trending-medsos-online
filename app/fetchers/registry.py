@@ -75,6 +75,7 @@ from .cmc_trending import (
 )
 from .hl_whales import HyperliquidWhaleWatcher
 from .iqplus import IQPlusNewsFetcher
+from .new_tokens import NewTokenPoolsFetcher
 from .tree_news import TreeNewsFetcher
 
 
@@ -139,6 +140,7 @@ def all_fetchers() -> List[BaseFetcher]:
         # Signal layer (see docs/RISET-SIGNAL-FILTER.md + docs/METRIK-FILTER.md)
         TreeNewsFetcher(),
         HyperliquidWhaleWatcher(),
+        NewTokenPoolsFetcher(),
     ]
 
 
@@ -186,7 +188,7 @@ FETCHER_GROUPS = [
     {
         "key": "signals",
         "label": "Signal Filter",
-        "categories": ["signal.news", "signal.onchain"],
+        "categories": ["signal.news", "signal.onchain", "signal.newtoken"],
         "icon": "⚡",
     },
 ]
