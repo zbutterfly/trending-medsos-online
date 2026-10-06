@@ -63,6 +63,17 @@ BURST_MIN_ITEMS = 3
 CASHTAG_RE = re.compile(r"\$([A-Z]{1,10})\b")
 IDX_SLUG_RE = re.compile(r"/news/stock_n/([a-zA-Z0-9]{4})-")
 
+# Stablecoin bukan objek sinyal "akan naik" — harganya dipatok. Buang dari ranking.
+STABLECOINS = {
+    "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD", "USDS", "BUSD",
+    "FRAX", "USDD", "CRVUSD", "SUSD", "USDS", "RLUSD", "USD1", "USDF",
+}
+# Entitas bukan-kripto yang sering muncul dari news saham/tokenized stock.
+STOCK_BLOCKLIST = {
+    "MSTR", "OPENAI", "ANTHROPIC", "COIN", "HOOD", "TSLA", "NVDA", "AAPL",
+    "META", "GOOG", "AMZN", "PLTR", "CRCL", "SPACEX", "SPX", "NDX",
+}
+
 # === Katalis IDX (docs/RISET-KATALIS-IDX.md; bobot dari riset serper 2026-10-06) ===
 # Bukti kunci: banyak aksi korporasi TIDAK menghasilkan abnormal return signifikan
 # (Riski 2025, BEI 2020-2023) → kata kunci saja tak cukup; butuh komposit + tense
@@ -122,6 +133,8 @@ def extract_symbols(item: Dict[str, Any]) -> List[Tuple[str, str, float]]:
         sym = (sym or "").strip().upper()
         if len(sym) < 2 or len(sym) > 10 or sym in seen:
             return
+        if sym in STABLECOINS or sym in STOCK_BLOCKLIST:
+            return  # stablecoin dipatok / entitas saham — bukan objek "akan naik"
         seen.add(sym)
         out.append((sym, venue, conf))
 
@@ -229,9 +242,12 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
         news_reason: Optional[str] = None
         if it.get("source") == "treenews":
             kind = str(extra.get("kind") or "").lower()
-            if kind in ("listing", "launch"):
+            # Hanya LISTING yang punya pola dump terdokumentasi (Empirica: −37,64%
+            # di 6 bulan). "Launch" Tree News sering = launch PRODUK (vault live,
+            # release) — netral, jangan didiskon.
+            if kind == "listing":
                 news_mult = 0.6
-                news_reason = "soft story (listing/launch): gerakan di/jelang rilis — beri diskon pasca-rilis"
+                news_reason = "listing: pola dump pasca-announcement (−37% 6 bln) — beri diskon"
             elif kind in ("partnership", "mainnet", "protocol", "hardfork", "etf", "adoption", "upgrade"):
                 news_mult = 1.3
                 news_reason = "katalis fundamental: drift pasca-event"
@@ -309,6 +325,10 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
                 "top_titles": [], "best_conf": 0.0,
             })
             contrib = w * decay * imp_boost * conf
+            # Diminishing returns: artikel ke-N tentang simbol yang sama menambah
+            # informasi sub-linear (1/√N). Tanpa ini mega-cap (BTC 38 item) selalu
+            # memuncaki purely karena volume berita baseline-nya tinggi.
+            contrib *= 1.0 / math.sqrt(max(1, entry["item_count"] + 1))
             entry["score"] += contrib
             entry["item_count"] += 1
             entry["best_conf"] = max(entry["best_conf"], conf)

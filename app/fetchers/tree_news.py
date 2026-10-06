@@ -53,9 +53,24 @@ class TreeNewsFetcher(BaseFetcher):
             symbols: List[str] = []
             for sug in row.get("suggestions") or []:
                 coin = (sug.get("coin") or "").upper()
-                if coin:
+                # Hanya coin yang punya pasangan di exchange kripto — news saham
+                # (MSTR, OPENAI, ANTHROPIC…) punya exchange NASDAQ/NYSE/kosong.
+                # Catatan: tokenized stock (xStocks) ikut berpasangan di Kraken/
+                # Bybit → tambahan mainStock marker + blocklist di bawah.
+                crypto_exchanges = (
+                    "binance", "bybit", "okx", "coinbase", "hyperliquid", "kraken",
+                    "kucoin", "upbit", "bitget", "gate", "deribit", "bithumb",
+                )
+                sug_symbols = sug.get("symbols") or []
+                is_crypto = any(
+                    any(cx in str(s.get("exchange") or "").lower() for cx in crypto_exchanges)
+                    for s in sug_symbols
+                )
+                stock_block = {"MSTR", "OPENAI", "ANTHROPIC", "COIN", "HOOD", "TSLA",
+                               "NVDA", "AAPL", "META", "GOOG", "AMZN", "PLTR", "CRCL", "SPACEX"}
+                if coin and is_crypto and coin not in stock_block and not row.get("mainStock"):
                     coins.append(coin)
-                for sym in sug.get("symbols") or []:
+                for sym in sug_symbols:
                     s = sym.get("symbol") or ""
                     if s and s not in symbols:
                         symbols.append(s)
