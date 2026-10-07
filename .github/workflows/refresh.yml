@@ -7,15 +7,20 @@ on:
 
 permissions:
   contents: read
+  actions: write   # gh cache delete + gh workflow run (rantai siklus)
 
 concurrency:
   group: refresh
-  cancel-in-progress: true
+  # false = run berantai berikutnya MENUNGGU run ini selesai (post-save DB
+  # harus sempat jalan); true akan membatalkan post-save saat run baru datang.
+  cancel-in-progress: false
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # 12 menit: siklus + sleep 360 dgn dispatch di ~menit ke-9 — jangan bunuh
+    # job sebelum rantai selesai.
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
 
@@ -32,14 +37,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: var/trending.db
-          # Kunci statis membuat DB BEKU: actions/cache tidak menimpa kunci yang
-          # sudah ada, jadi state lintas-run (position_history utk deteksi
-          # build, signal_log utk akurasi, dedup) hilang tiap siklus. Kunci
-          # unik per-run + restore-keys = restore cache terbaru, simpan baru.
-          key: trending-db-v3-${{ github.run_id }}
-          restore-keys: |
-            trending-db-v3-
-            trending-db-v1
+          # KUNCI TETAP + exact match. Pelajaran 8 Okt (bukti log #14-#18):
+          # prefix-matching restore-keys v4 TIDAK berfungsi utk kunci per-run
+          # (trending-db-v3-* tersimpan 4x tapi tak pernah ter-restore —
+          # semua run jatuh ke fallback trending-db-v1); exact match jalan
+          # terbukti. Maka: kunci tetap, dan entri lama dihapus mid-job
+          # supaya post-save actions/cache (yang menolak menimpa kunci yang
+          # sudah ada) bisa menyimpan DB terbaru tiap siklus.
+          key: trending-db-v4
+
+      - name: Hapus entri cache (agak post-save bisa menimpa)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh cache delete trending-db-v4 --repo "$GITHUB_REPOSITORY" || true
 
       - name: Run one fetch cycle + publish to HF Space
         env:
@@ -78,3 +88,15 @@ jobs:
               sys.exit(1)
           print("canary: OK — data segar.")
           EOF
+
+      # Cadence: cron */10 GitHub MIRIP throttled (bukti: 18 run dalam 3 hari,
+      # gap 6-7 jam) — high-frequency schedule sering delayed/dropped. Rantai
+      # self-dispatch menjaga irama ~10 menit; cron tetap jadi backstop bila
+      # rantai putus (run gagal total). sleep 360 + durasi run ≈ 9-11 menit.
+      - name: Antrikan siklus berikutnya (rantai self-dispatch)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 360
+          gh workflow run refresh.yml --repo "$GITHUB_REPOSITORY" || true
