@@ -36,6 +36,7 @@ from app.db import storage                      # noqa: E402
 from app.fetchers.base import epoch_ms, gather_all  # noqa: E402
 from app.fetchers.registry import FETCHER_GROUPS, all_fetchers  # noqa: E402
 from app.signals import compute_signals         # noqa: E402
+from app.accuracy import compute_accuracy       # noqa: E402
 
 SITE = ROOT / "static-site"
 DATA = SITE / "data"
@@ -59,7 +60,14 @@ async def main() -> None:
     print(f"[run] fetchers={len(fetchers)} total={counts['total']} "
           f"new={counts['new']} updated={counts['updated']}")
 
+    # Jendela sinyal 72h — item lebih tua dari 8 hari tak terpakai lagi;
+    # pangkas agar SQLite (cache antar-run Actions) tidak membengkak.
+    # signal_log & position_history TIDAK dipangkas (bahan akurasi + build).
+    pruned = await storage.prune_items(started - 8 * 86_400_000)
+    print(f"[run] prune item >8 hari: {pruned} baris")
+
     signals = await compute_signals()
+    accuracy = await compute_accuracy()
     ended = epoch_ms()
 
     # health.json — bentuk sama dengan GET /api/health
@@ -89,6 +97,10 @@ async def main() -> None:
 
     # signals.json — ranked symbols (sama dengan GET /api/signals)
     _write(DATA / "signals.json", signals)
+
+    # signals-accuracy.json — hit-rate 4h/24h dari signal_log
+    # (sama dengan GET /api/signals/accuracy di backend API)
+    _write(DATA / "signals-accuracy.json", accuracy)
 
     n_files = sum(1 for _ in DATA.rglob("*.json"))
     print(f"[run] {n_files} file JSON ditulis ke {DATA}")

@@ -298,3 +298,16 @@ async def list_signal_log(limit: int = 1000) -> List[Dict[str, Any]]:
         {"bucket": r[0], "symbol": r[1], "venue": r[2], "ts": r[3], "score": r[4], "reasons": r[5]}
         for r in rows
     ]
+
+
+async def prune_items(older_than_ms: int) -> int:
+    """Buang items dengan last_seen < older_than_ms.
+
+    Jendela sinyal hanya 72h — item lebih tua tak terpakai; pangkas (~8 hari)
+    agar SQLite yang di-cache antar-run Actions tidak membengkak.
+    signal_log & position_history TIDAK disentuh (bahan akurasi + deteksi build).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM items WHERE last_seen < ?", (older_than_ms,))
+        await db.commit()
+        return cursor.rowcount or 0

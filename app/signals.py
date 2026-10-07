@@ -73,6 +73,22 @@ STOCK_BLOCKLIST = {
     "MSTR", "OPENAI", "ANTHROPIC", "COIN", "HOOD", "TSLA", "NVDA", "AAPL",
     "META", "GOOG", "AMZN", "PLTR", "CRCL", "SPACEX", "SPX", "NDX",
 }
+# Simbol yang namanya sama dengan kata bahasa Inggris umum. Tagging wire
+# (suggestions Tree News) kerap menangkap kata prosa dari isi tweet sebagai
+# "coin" ("…Firm Being Based in Singapore" → BASED; akun media @Stable →
+# STABLE — keduanya terverifikasi di ranking live 2026-10-07). Untuk simbol
+# ini, atribusi via suggestions HANYAH sah bila judul memuat cashtag eksplisit
+# $SYM; bukti lain (posisi exchange hyperliquid, cashtag) tetap sah.
+# NEAR/SAFE/LINK sengaja TIDAK masuk — token volume-tinggi yang kehilangan
+# atribusi wire lebih mahal daripada noise prosanya. Tumbuhkan set ini
+# saat polusi baru terlihat di ranking.
+AMBIGUOUS_PROSE_SYMBOLS = {
+    "BASED", "STABLE", "MORE", "GOOD", "BEST", "WELL", "JUST", "ONLY",
+    "VERY", "MOST", "GREAT", "MAJOR", "FIRST", "NEXT", "REAL", "TRUE",
+    "FAST", "SMART", "DEEP", "HIGH", "LOW", "BIG", "TOP", "NEW", "MOON",
+    "PUMP", "GAME", "PLAY", "SWAP", "FARM", "SPACE", "TIME", "WORLD",
+    "GOLD", "LIVE", "OPEN", "LONG", "SHORT",
+}
 
 # === Katalis IDX (docs/RISET-KATALIS-IDX.md; bobot dari riset serper 2026-10-06) ===
 # Bukti kunci: banyak aksi korporasi TIDAK menghasilkan abnormal return signifikan
@@ -142,9 +158,14 @@ def extract_symbols(item: Dict[str, Any]) -> List[Tuple[str, str, float]]:
     title = item.get("title") or ""
 
     if source == "hyperliquid" and extra.get("coin"):
-        add(str(extra["coin"]), "crypto", 1.0)
+        add(str(extra["coin"]), "crypto", 1.0)  # posisi exchange — otoritatif
     for c in extra.get("coins") or []:
-        add(str(c), "crypto", 0.95)
+        sym = str(c).strip().upper()
+        # Simbol kata-prosa dari tagging wire: buang kecuali judul memuat
+        # cashtag eksplisit ($SYM) — bukan sekadar kata "Based/Stable" di kalimat.
+        if sym in AMBIGUOUS_PROSE_SYMBOLS and f"${sym}" not in title.upper():
+            continue
+        add(sym, "crypto", 0.95)
     for m in CASHTAG_RE.findall(title):
         add(m, "crypto", 0.70)
     # IQPlus slug carries the IDX ticker (ekom-... → EKOM)
@@ -224,7 +245,9 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
             else:
                 matched = [(w, lab) for pat, w, lab in IDX_CATALYSTS if pat.search(title_l)]
                 if matched:
-                    mult = min(w for w, _ in matched)
+                    # Katalis TERKUAT yang hadir — min() membuat MTO + stock split
+                    # jadi lebih lemah dari MTO sendiri; komposit harus menguatkan.
+                    mult = max(w for w, _ in matched)
                     if len(matched) >= 2:
                         mult *= 1.3
                     if IDX_EARLY_RE.search(title_l):
@@ -380,8 +403,11 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
             reasons.append("hedge: whale delta-neutral (spot mengisi perp short)")
         if burst:
             reasons.append(f"burst: {e['fresh_2h']} item dalam {BURST_WINDOW_H:.0f} jam")
-        if e["item_count"] >= 2:
+        if len(e["sources"]) >= 2:
             reasons.append(f"konsensus {len(e['sources'])} sumber")
+        elif e["item_count"] >= 2:
+            # ≥2 item dari 1 sumber = pengulangan wire, BUKAN konsensus.
+            reasons.append(f"repeat {e['item_count']} item dari 1 sumber")
         if not reasons:
             continue  # one weak mention alone is noise — filter it out
         signals.append({

@@ -2,3 +2,4 @@ node_modules
 var/
 __pycache__/
 *.pyc
+static-site/data/

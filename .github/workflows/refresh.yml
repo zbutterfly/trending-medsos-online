@@ -32,7 +32,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: var/trending.db
-          key: trending-db-v1
+          # Kunci statis membuat DB BEKU: actions/cache tidak menimpa kunci yang
+          # sudah ada, jadi state lintas-run (position_history utk deteksi
+          # build, signal_log utk akurasi, dedup) hilang tiap siklus. Kunci
+          # unik per-run + restore-keys = restore cache terbaru, simpan baru.
+          key: trending-db-v3-${{ github.run_id }}
+          restore-keys: |
+            trending-db-v3-
+            trending-db-v1
 
       - name: Run one fetch cycle + publish to HF Space
         env:
@@ -46,3 +53,28 @@ jobs:
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
         run: python scripts/run_once.py
+
+      # Canary: bila siklus ini gagal ATAU pipeline macet (kuota Actions habis
+      # / workflow disabled / upload HF gagal), dataset tidak ter-update.
+      # Gagalkan job supaya GitHub mengirim email failure — deteksi paling
+      # murah, tanpa layanan monitoring eksternal (Space privat anti-probe).
+      - name: Canary — dataset harus segar (<30 menit)
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, sys, time, urllib.request
+          URL = "https://huggingface.co/datasets/Jetbard/tmx-feed-g9nh5j/resolve/main/signals.json"
+          try:
+              req = urllib.request.Request(URL, headers={"User-Agent": "canary"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  d = json.load(r)
+          except Exception as e:
+              print(f"canary: GAGAL fetch dataset: {e}")
+              sys.exit(1)
+          age = (time.time() * 1000 - int(d.get("generated_at") or 0)) / 60000
+          print(f"canary: data berumur {age:.1f} menit")
+          if age > 30:
+              print(f"canary: DATA STALE — pipeline tidak sehat ({age:.0f} menit).")
+              sys.exit(1)
+          print("canary: OK — data segar.")
+          EOF
