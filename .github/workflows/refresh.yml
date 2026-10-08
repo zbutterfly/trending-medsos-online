@@ -33,23 +33,18 @@ jobs:
       - name: Install deps (slim)
         run: pip install -r requirements-runtime.txt
 
-      - name: Restore trending.db
-        uses: actions/cache@v4
+      - name: Restore trending.db (kunci run SEBELUMNYA)
+        uses: actions/cache/restore@v4
         with:
           path: var/trending.db
-          # KUNCI TETAP + exact match. Pelajaran 8 Okt (bukti log #14-#18):
-          # prefix-matching restore-keys v4 TIDAK berfungsi utk kunci per-run
-          # (trending-db-v3-* tersimpan 4x tapi tak pernah ter-restore —
-          # semua run jatuh ke fallback trending-db-v1); exact match jalan
-          # terbukti. Maka: kunci tetap, dan entri lama dihapus mid-job
-          # supaya post-save actions/cache (yang menolak menimpa kunci yang
-          # sudah ada) bisa menyimpan DB terbaru tiap siklus.
-          key: trending-db-v4
-
-      - name: Hapus entri cache (agak post-save bisa menimpa)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh cache delete trending-db-v4 --repo "$GITHUB_REPOSITORY" || true
+          # Pelajaran 9 Okt (bukti run #50: new=1080 = DB fresh lagi): skema
+          # kunci-tetap + gh-cache-delete ber-RACE — dispatch rantai menembak
+          # run berikutnya SEBELUM post-save selesai, run baru restore saat
+          # entri sedang dihapus/di-upload → miss. Skema v6: kunci unik per
+          # run_number; rantai sequential → run N selalu restore kunci N-1
+          # (eksak, tanpa restore-keys, tanpa delete). Miss = DB segar sekali
+          # saja, lalu rantai normal.
+          key: trending-db-v6-${{ github.run_number - 1 }}
 
       - name: Run one fetch cycle + publish to HF Space
         env:
@@ -63,6 +58,15 @@ jobs:
           COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
           CMC_API_KEY: ${{ secrets.CMC_API_KEY }}
         run: python scripts/run_once.py
+
+      # Simpan DB SEBELUM dispatch rantai — urutan inilah yang memutus race
+      # (dulu save terjadi di post-step SETELAH run berikutnya di-dispatch).
+      - name: Simpan trending.db (kunci run INI)
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: var/trending.db
+          key: trending-db-v6-${{ github.run_number }}
 
       # Canary: bila siklus ini gagal ATAU pipeline macet (kuota Actions habis
       # / workflow disabled / upload HF gagal), dataset tidak ter-update.
