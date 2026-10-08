@@ -3,7 +3,12 @@ name: refresh-data
 on:
   schedule:
     - cron: "*/10 * * * *"   # tiap 10 menit (GitHub minimum 5 menit; bisa telat saat peak)
-  workflow_dispatch: {}       # tombol "Run workflow" manual
+  workflow_dispatch:         # tombol "Run workflow" manual + rantai self-dispatch
+    inputs:
+      prev_key:
+        description: "Kunci cache DB run sebelumnya (otomatis diisi rantai)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -33,18 +38,20 @@ jobs:
       - name: Install deps (slim)
         run: pip install -r requirements-runtime.txt
 
-      - name: Restore trending.db (kunci run SEBELUMNYA)
+      - name: Restore trending.db (kunci dari run sebelumnya)
+        # Pelajaran 9 Okt: (a) run #50 — kunci-tetap + gh-cache-delete ber-RACE
+        # (dispatch menembak run berikutnya sebelum save selesai); (b) skema
+        # aritmetika v6 `${{ github.run_number - 1 }}` DITOLAK validator
+        # workflow GitHub (actionlint: "unexpected character ' ' lexing
+        # integer") — run #55 gagal tanpa job. Skema v7: rantai mengoper
+        # kunci via input prev_key (shell, tanpa ekspresi aritmetika);
+        # cron/manual tanpa input = DB segar sekali, lalu rantai normal.
+        # continue-on-error: masalah cache tidak boleh membunuh siklus data.
         uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
           path: var/trending.db
-          # Pelajaran 9 Okt (bukti run #50: new=1080 = DB fresh lagi): skema
-          # kunci-tetap + gh-cache-delete ber-RACE — dispatch rantai menembak
-          # run berikutnya SEBELUM post-save selesai, run baru restore saat
-          # entri sedang dihapus/di-upload → miss. Skema v6: kunci unik per
-          # run_number; rantai sequential → run N selalu restore kunci N-1
-          # (eksak, tanpa restore-keys, tanpa delete). Miss = DB segar sekali
-          # saja, lalu rantai normal.
-          key: trending-db-v6-${{ github.run_number - 1 }}
+          key: ${{ inputs.prev_key || 'trending-db-v7-bootstrap' }}
 
       - name: Run one fetch cycle + publish to HF Space
         env:
@@ -61,12 +68,14 @@ jobs:
 
       # Simpan DB SEBELUM dispatch rantai — urutan inilah yang memutus race
       # (dulu save terjadi di post-step SETELAH run berikutnya di-dispatch).
+      # Kunci unik per run_number → tidak pernah di-skip; tanpa aritmetika.
       - name: Simpan trending.db (kunci run INI)
         if: success()
         uses: actions/cache/save@v4
+        continue-on-error: true
         with:
           path: var/trending.db
-          key: trending-db-v6-${{ github.run_number }}
+          key: trending-db-v7-${{ github.run_number }}
 
       # Canary: bila siklus ini gagal ATAU pipeline macet (kuota Actions habis
       # / workflow disabled / upload HF gagal), dataset tidak ter-update.
@@ -103,4 +112,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           sleep 360
-          gh workflow run refresh.yml --repo "$GITHUB_REPOSITORY" || true
+          gh workflow run refresh.yml --repo "$GITHUB_REPOSITORY" \
+            -f prev_key="trending-db-v7-${{ github.run_number }}" || true
