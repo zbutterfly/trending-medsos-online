@@ -306,8 +306,18 @@ async def prune_items(older_than_ms: int) -> int:
     Jendela sinyal hanya 72h — item lebih tua tak terpakai; pangkas (~8 hari)
     agar SQLite yang di-cache antar-run Actions tidak membengkak.
     signal_log & position_history TIDAK disentuh (bahan akurasi + deteksi build).
+    Tambahan: TTL khusus signal.newtoken 72 jam — feed pool baru usang =
+    menyesatkan (URL/titik data berumur), biar mati sendiri tanpa menunggu prune umum.
     """
+    import time as _t
+
+    ttl_ms = int(_t.time() * 1000) - 72 * 3_600_000
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("DELETE FROM items WHERE last_seen < ?", (older_than_ms,))
+        n = cursor.rowcount or 0
+        cursor2 = await db.execute(
+            "DELETE FROM items WHERE category='signal.newtoken' AND last_seen < ?",
+            (ttl_ms,),
+        )
         await db.commit()
-        return cursor.rowcount or 0
+        return n + (cursor2.rowcount or 0)
