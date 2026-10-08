@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ..core.http import Plain
+from ..signals import STABLECOINS
 from .base import BaseFetcher
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,35 @@ NETWORKS = "eth,solana,base,bsc,arbitrum"
 MAX_AGE_H = 72.0        # hanya pool berusia ≤ 3 hari
 MIN_LIQUIDITY_USD = 15_000.0   # di bawah ini = buang (rugs & saluran spam)
 MIN_VOLUME_24H_USD = 10_000.0
+
+# Slug URL web DEXscreener ≠ id network GeckoTerminal. DEXscreener memakai
+# nama chain PENUH (verifikasi 9 Okt 2026 via api.dexscreener.com — field url
+# pair resmi = dexscreener.com/ethereum/0x…; id 'eth' ditolak HTTP 400),
+# sedangkan web GeckoTerminal sendiri pakai id pendek (…/eth/pools/0x… → 200).
+DEXSCREENER_SLUGS = {
+    "eth": "ethereum",
+    "solana": "solana",
+    "base": "base",
+    "bsc": "bsc",
+    "arbitrum": "arbitrum",
+    "polygon_pos": "polygon",
+    "avax": "avalanche",
+    "optimism": "optimism",
+    "sui": "sui",
+    "ton": "ton",
+}
+
+# Stablecoin = bukan objek sinyal "akan naik". Tiga lapis: simbol ticker
+# (STABLECOINS di signals.py), coingecko_coin_id (paling andal — pool USDT
+# 0x83cbee… lolos dengan simbol "TETHER", tapi coin_id-nya "tether"), nama.
+STABLECOIN_CG_IDS = {
+    "tether", "usd-coin", "dai", "first-digital-usd", "true-usd",
+    "binance-usd", "frax", "usds", "usdd", "paypal-usd", "bridged-usdc-3",
+}
+STABLECOIN_NAMES = {
+    "tether", "usd coin", "dai", "first digital usd", "trueusd", "true usd",
+    "frax", "usds",
+}
 
 SOURCE_WEIGHT_HINT = 0.5  # lihat signals.py SOURCE_WEIGHTS["geckoterminal"]
 
@@ -81,6 +111,11 @@ class NewTokenPoolsFetcher(BaseFetcher):
             symbol = (base_attrs.get("symbol") or "").strip().upper()
             if not symbol or len(symbol) > 12:
                 continue  # token tanpa simbol layak = buang
+            cg_id = str(base_attrs.get("coingecko_coin_id") or "").strip().lower()
+            base_name = str(base_attrs.get("name") or "").strip().lower()
+            if (symbol in STABLECOINS or cg_id in STABLECOIN_CG_IDS
+                    or base_name in STABLECOIN_NAMES):
+                continue  # pool stablecoin (USDT/WETH dll) = bukan sinyal "akan naik"
 
             dex_rel = ((rel.get("dex") or {}).get("data") or {}).get("id")
             dex_name = (inc.get(dex_rel) or {}).get("attrs", {}).get("name") or "DEX"
@@ -98,6 +133,9 @@ class NewTokenPoolsFetcher(BaseFetcher):
             network = pool.get("id", "_").split("_", 1)[0]
             pool_addr = attrs.get("address") or ""
             token_addr = base_attrs.get("address") or ""
+            # URL yang benar di web DEXscreener: slug penuh + alamat POOL
+            # (bukan alamat token). Lihat catatan DEXSCREENER_SLUGS di atas.
+            net_slug = DEXSCREENER_SLUGS.get(network, network)
 
             def _usd(v: Any) -> str:
                 try:
@@ -116,7 +154,7 @@ class NewTokenPoolsFetcher(BaseFetcher):
             out.append(self.record(
                 id=str(pool.get("id") or pool_addr),
                 title=title,
-                url=f"https://dexscreener.com/{network}/{pool_addr}",
+                url=f"https://dexscreener.com/{net_slug}/{pool_addr}",
                 extra={
                     "coins": [symbol],  # entity resolution via extract_symbols
                     "symbol": symbol,
@@ -129,6 +167,8 @@ class NewTokenPoolsFetcher(BaseFetcher):
                     "tx_24h": tx.get("h24"),
                     "token_address": token_addr,
                     "pool_address": pool_addr,
+                    "dexscreener_url": f"https://dexscreener.com/{net_slug}/{pool_addr}",
+                    "gecko_pool_url": f"https://www.geckoterminal.com/{network}/pools/{pool_addr}",
                     "goplus_url": (
                         f"https://gopluslabs.io/token-security/{token_addr}"
                         if network in ("eth", "base", "bsc", "arbitrum") and token_addr else None
