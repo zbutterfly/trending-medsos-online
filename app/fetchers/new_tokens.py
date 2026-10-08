@@ -14,6 +14,7 @@ Category : signal.newtoken
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -57,6 +58,16 @@ STABLECOIN_NAMES = {
     "tether", "usd coin", "dai", "first digital usd", "trueusd", "true usd",
     "frax", "usds",
 }
+# Detektor word-boundary gabungan (simbol+nama+coin_id) — menangkap pool
+# stablecoin PALASU (contoh riil 9 Okt: eth_0x83cbee ber-simbol 'Tether',
+# nama 'USDT', alamat ≠ kontrak USDT asli, FDV palsu $89 M) sekaligus yang
+# asli — keduanya bukan objek sinyal "akan naik". Word-boundary mencegah
+# false-positive seperti 'DAILY' mengandung 'dai'.
+_STABLE_RE = re.compile(
+    r"\b(usdt|usdc|tether|usd\s?coin|dai|fdusd|first\s?digital|true\s?usd"
+    r"|tusd|frax|usds|usde|pyusd|usdd)\b",
+    re.I,
+)
 
 SOURCE_WEIGHT_HINT = 0.5  # lihat signals.py SOURCE_WEIGHTS["geckoterminal"]
 
@@ -114,8 +125,9 @@ class NewTokenPoolsFetcher(BaseFetcher):
             cg_id = str(base_attrs.get("coingecko_coin_id") or "").strip().lower()
             base_name = str(base_attrs.get("name") or "").strip().lower()
             if (symbol in STABLECOINS or cg_id in STABLECOIN_CG_IDS
-                    or base_name in STABLECOIN_NAMES):
-                continue  # pool stablecoin (USDT/WETH dll) = bukan sinyal "akan naik"
+                    or base_name in STABLECOIN_NAMES
+                    or _STABLE_RE.search(f"{symbol} {base_name} {cg_id}")):
+                continue  # pool stablecoin asli ATAU palasu (impersonasi) — buang
 
             dex_rel = ((rel.get("dex") or {}).get("data") or {}).get("id")
             dex_name = (inc.get(dex_rel) or {}).get("attrs", {}).get("name") or "DEX"
@@ -146,7 +158,7 @@ class NewTokenPoolsFetcher(BaseFetcher):
                     f"{f/1e6:.1f}M" if f >= 1e6 else f"{f/1e3:.0f}K")
 
             title = (
-                f"{symbol} — pool baru di {dex_name} ({network})"
+                f"{symbol} — pool baru di {dex_name} ({net_slug})"
                 f" | Liq ${_usd(liquidity)} | Vol24 ${_usd(vol24)}"
                 + (f" | FDV ${_usd(fdv)}" if fdv else "")
                 + f" | usia pool {age_h:.0f} jam"
