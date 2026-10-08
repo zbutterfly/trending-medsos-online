@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS position_history (
 CREATE INDEX IF NOT EXISTS poshist_by_addr ON position_history(address, coin, ts DESC);
 
 -- Log sinyal per 2 jam per simbol — bahan pengukuran akurasi (hit-rate 4h/24h)
--- dan labeling masa depan untuk LightGBM.
+-- dan labeling masa depan untuk LightGBM. btc_px/ihsg_px = harga BASELINE
+-- (BTC utk venue crypto, IHSG utk venue idx) saat sinyal dibuat — sinyal hanya
+-- dianggap "benar" bila MENGALAHKAN baseline-nya (excess return, riset bab 1).
 CREATE TABLE IF NOT EXISTS signal_log (
     bucket  INTEGER NOT NULL,
     symbol  TEXT NOT NULL,
@@ -72,6 +74,8 @@ CREATE TABLE IF NOT EXISTS signal_log (
     ts      INTEGER NOT NULL,
     score   REAL NOT NULL,
     reasons TEXT NOT NULL,
+    btc_px  REAL,
+    ihsg_px REAL,
     PRIMARY KEY (symbol, venue, bucket)
 );"""
 
@@ -86,6 +90,13 @@ async def init_db() -> None:
     _ensure_db()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(SCHEMA)
+        # Migrasi ringan utk DB lama (cache Actions / lokal): tambah kolom
+        # baseline. Idempoten — error "duplicate column name" diabaikan.
+        for col in ("btc_px", "ihsg_px"):
+            try:
+                await db.execute(f"ALTER TABLE signal_log ADD COLUMN {col} REAL")
+            except Exception:  # noqa: BLE001 — kolom sudah ada (DB baru)
+                pass
         await db.commit()
 
 
@@ -264,14 +275,16 @@ async def list_position_history(address: str, coin: str, since_ms: int) -> List[
 
 # === signal_log (accuracy tracking) ===
 async def log_signal(rows: List[Dict[str, Any]]) -> int:
-    """Rows: {bucket, symbol, venue, ts, score, reasons}. 1 baris per simbol per bucket 2 jam."""
+    """Rows: {bucket, symbol, venue, ts, score, reasons, btc_px?, ihsg_px?}.
+    1 baris per simbol per bucket 2 jam."""
     if not rows:
         return 0
     async with aiosqlite.connect(DB_PATH) as db:
         for r in rows:
             await db.execute(
-                "INSERT OR IGNORE INTO signal_log (bucket, symbol, venue, ts, score, reasons) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO signal_log "
+                "(bucket, symbol, venue, ts, score, reasons, btc_px, ihsg_px) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     int(r["bucket"]),
                     str(r["symbol"]),
@@ -279,6 +292,8 @@ async def log_signal(rows: List[Dict[str, Any]]) -> int:
                     int(r["ts"]),
                     float(r["score"]),
                     str(r["reasons"]),
+                    r.get("btc_px"),
+                    r.get("ihsg_px"),
                 ),
             )
         await db.commit()
@@ -288,14 +303,19 @@ async def log_signal(rows: List[Dict[str, Any]]) -> int:
 async def list_signal_log(limit: int = 1000) -> List[Dict[str, Any]]:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT bucket, symbol, venue, ts, score, reasons "
+            "SELECT bucket, symbol, venue, ts, score, reasons, btc_px, ihsg_px "
             "FROM signal_log ORDER BY ts DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()
         await cursor.close()
     return [
-        {"bucket": r[0], "symbol": r[1], "venue": r[2], "ts": r[3], "score": r[4], "reasons": r[5]}
+        {
+            "bucket": r[0], "symbol": r[1], "venue": r[2], "ts": r[3],
+            "score": r[4], "reasons": r[5],
+            "btc_px": r[6] if len(r) > 6 else None,
+            "ihsg_px": r[7] if len(r) > 7 else None,
+        }
         for r in rows
     ]
 

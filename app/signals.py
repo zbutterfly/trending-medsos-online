@@ -24,6 +24,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .db import storage
+from .baselines import fetch_baselines
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +60,19 @@ IMPORTANCE_MAX = 10.0        # Tree News importance field is ~0..10
 SMART_MONEY_MULT = 2.5
 BURST_WINDOW_H = 2.0
 BURST_MIN_ITEMS = 3
+
+# === Gerbang anti-salah-beli (docs/RISET-SIGNAL-QUALITY-10-10.md bab 6) ===
+# SHADOW MODE dulu (bab 6: 3+ bucket data sebelum aktif): gate hanya MENCATAT
+# gate_flags — skor & ranking TIDAK diubah. Setelah review data, balik
+# SHADOW_GATES=False utk benar-benar memblokir/menurunkan.
+SHADOW_GATES = True
+GATE_MIN_LIQ_USD = 50_000.0  # G1 (#5): pool likuiditas < $50K tak layak beli
+GATE_HONEYPOT_SELLS = 0.0    # G3 (#2; Chainalysis 2025: 94% PnD kena rug)
+                             # pool TANPA satu pun sell 24 jam = honeypot klasik
+GATE_LIQ_FDV = 0.07          # G6 (#4): low-float/high-FDV trap
+GATE_DD30_PCT = 40.0         # #1: wallet DD30 ekstrem — catat di shadow
+                             # (HYPE/SMARTESTMONEY sendiri DD30 47,7% — biarkan
+                             # data terkumpul yang memutuskan, bukan asumsi)
 
 CASHTAG_RE = re.compile(r"\$([A-Z]{1,10})\b")
 IDX_SLUG_RE = re.compile(r"/news/stock_n/([a-zA-Z0-9]{4})-")
@@ -175,6 +189,29 @@ def extract_symbols(item: Dict[str, Any]) -> List[Tuple[str, str, float]]:
     return out
 
 
+def _evaluate_gates(sources, gctx: Dict[str, Any]) -> List[str]:
+    """Gerbang anti-salah-beli — SHADOW MODE: hanya mengembalikan daftar flag
+    (skor tidak disentuh). Dipanggil per sinyal jadi; konteks gctx dikumpulkan
+    per-simbol saat loop item (liq/sells/liq-fdv dari GeckoTerminal, DD30 dari
+    kualitas wallet Hyperliquid)."""
+    flags: List[str] = []
+    if "geckoterminal" in sources:
+        liq = gctx.get("liq_usd")
+        if liq is not None and liq < GATE_MIN_LIQ_USD:
+            flags.append(f"gate: likuiditas ${liq/1e3:.0f}K < $50K")
+        sells = gctx.get("sells_24h")
+        if sells is not None and sells <= GATE_HONEYPOT_SELLS:
+            flags.append("gate: honeypot? 0 sell 24 jam")
+        lf = gctx.get("lf")
+        if lf is not None and lf < GATE_LIQ_FDV:
+            flags.append(f"gate: liq/FDV {lf:.2f} < 0,07")
+    if "hyperliquid" in sources:
+        dd = gctx.get("dd30")
+        if dd is not None and dd > GATE_DD30_PCT:
+            flags.append(f"gate: DD30 wallet {dd:.0f}% > 40%")
+    return flags
+
+
 def _item_ts(item: Dict[str, Any]) -> int:
     extra = item.get("extra") or {}
     ts = extra.get("published_ms") or item.get("fetched_at")
@@ -187,6 +224,9 @@ def _item_ts(item: Dict[str, Any]) -> int:
 async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
     """Read recent items from SQLite, score per symbol, rank, return payload."""
     now_ms = int(time.time() * 1000)
+    # Baseline (BTC/IHSG) utk label excess-return di signal_log — sekali per
+    # siklus; None bila fetch gagal (pipeline tak boleh mati karena baseline).
+    baselines = await fetch_baselines()
     items: List[Dict[str, Any]] = []
     for cat in SIGNAL_CATEGORIES:
         try:
@@ -347,6 +387,28 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
                 "item_count": 0, "fresh_2h": 0, "sources": set(),
                 "top_titles": [], "best_conf": 0.0,
             })
+            # Konteks utk shadow gates — kumpulkan per simbol dari item ini
+            # (liq/FDV/sells dari GeckoTerminal; DD30 maksimum antar wallet).
+            gctx = entry.setdefault("gctx", {
+                "liq_usd": None, "lf": None, "sells_24h": None, "dd30": None})
+            if it.get("source") == "geckoterminal":
+                try:
+                    _gliq = float(extra.get("liquidity_usd") or 0)
+                    _gfdv = float(extra.get("fdv_usd") or 0)
+                    if _gliq > 0:
+                        gctx["liq_usd"] = _gliq
+                        if _gfdv > 0:
+                            gctx["lf"] = _gliq / _gfdv
+                    _gsells = (extra.get("tx_24h") or {}).get("sells")
+                    if _gsells is not None:
+                        gctx["sells_24h"] = float(_gsells)
+                except (TypeError, ValueError):
+                    pass
+            if is_whale and not whale_hedge:
+                _dd = (extra.get("quality") or {}).get("max_dd_30d_pct")
+                if _dd is not None:
+                    prev = gctx["dd30"] or 0.0
+                    gctx["dd30"] = max(prev, float(_dd))
             contrib = w * decay * imp_boost * conf
             # Diminishing returns: artikel ke-N tentang simbol yang sama menambah
             # informasi sub-linear (1/√N). Tanpa ini mega-cap (BTC 38 item) selalu
@@ -410,6 +472,8 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
             reasons.append(f"repeat {e['item_count']} item dari 1 sumber")
         if not reasons:
             continue  # one weak mention alone is noise — filter it out
+        # Shadow gates — catat saja; skor & ranking tidak berubah (bab 6).
+        gate_flags = _evaluate_gates(e["sources"], e.get("gctx") or {})
         signals.append({
             "symbol": sym,
             "venue": venue,
@@ -419,19 +483,27 @@ async def compute_signals(limit_per_category: int = 400) -> Dict[str, Any]:
             "source_count": len(e["sources"]),
             "sources": sorted(e["sources"]),
             "reason_codes": reasons,
+            "gate_flags": gate_flags,
             "titles": e["top_titles"],
         })
 
     signals.sort(key=lambda s: s["score"], reverse=True)
 
-    # Log untuk pengukuran akurasi (hit-rate 4h/24h) — 1 baris per simbol per 2 jam.
+    # Log untuk pengukuran akurasi (hit-rate 4h/24h + EXCESS vs baseline) —
+    # 1 baris per simbol per 2 jam. Gate flags ikut dicatat (prefiks GATE)
+    # supaya review shadow-mode bisa menghitung "berapa banyak yang akan
+    # diblokir". Baseline px disimpan SAAT sinyal dibuat (bebas look-ahead).
     bucket = now_ms // 7_200_000
     try:
         await storage.log_signal([
             {
                 "bucket": bucket, "symbol": s["symbol"], "venue": s["venue"],
                 "ts": now_ms, "score": s["score"],
-                "reasons": json.dumps(s["reason_codes"], ensure_ascii=False),
+                "reasons": json.dumps(
+                    s["reason_codes"] + [f"GATE {g}" for g in s.get("gate_flags", [])],
+                    ensure_ascii=False),
+                "btc_px": baselines.get("BTC"),
+                "ihsg_px": baselines.get("IHSG"),
             }
             for s in signals[:30]
         ])
